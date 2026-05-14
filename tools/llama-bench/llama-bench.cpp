@@ -2056,12 +2056,6 @@ struct sql_printer : public printer {
     }
 };
 
-struct ctx_state {
-    int depth = 0; // in tokens
-
-    std::vector<uint8_t> buf; // the llama_context state buffer
-};
-
 static bool test_prompt(llama_context * ctx, int n_prompt, int n_batch, int n_threads) {
     llama_set_n_threads(ctx, n_threads, n_threads);
 
@@ -2200,7 +2194,14 @@ int main(int argc, char ** argv) {
 
     // store the llama_context state at the previous depth that we performed a test
     // ref: https://github.com/ggml-org/llama.cpp/pull/16944#issuecomment-3478151721
-    std::map<int, ctx_state> cstates;
+    // INSTEAD store the state at all encountered depths on the heap
+    // this is wasteful since many checkpoints will not be used at all
+    // also the cache will be bloated by duplicate sub-sequences
+    // which left unoptimized, eg in unified RAM systems, may (or may not) impact benchmarks
+    // But it's much faster for eg long-context performance optimization,
+    // though perhaps may artificially reduce noise due to reuse
+    // ref: https://github.com/ggml-org/llama.cpp/pull
+    std::map<int, const std::vector<uint8_t> &> cstates;
 
     int  params_idx   = 0;
     auto params_count = params_instances.size();
@@ -2329,31 +2330,28 @@ int main(int argc, char ** argv) {
             llama_memory_clear(llama_get_memory(ctx), false);
 
             if (t.n_depth > 0) {
-                auto cstate = cstates.rbegin();
-                bool is_cached = false;
-                do {
-                    if (cstate->first <= t.n_depth) {
-                        is_cached = true;
+                int rem_depth = t.n_depth;
+                // Of all previously encountered depths, find the largest one
+                for (auto it = cstates.crbegin(); it != cstates.crend(); ++it) {
+                    // that is at most the current target
+                    if (it->first <= t.n_depth) {
+                        // and just restore the state
+                        const size_t ret = llama_state_seq_set_data(ctx, it->second.data(), it->second.size(), 0);
+                        if (ret != 0) {
+                            // while noting the remainder.
+                            rem_depth -= it->first;
+                        }
                         break;
-                    }
-                } while (++cstate != cstates.rend());
-
-                if (is_cached) {
-                    // if previously we have computed some depth, just restore the state
-                    const size_t ret = llama_state_seq_set_data(ctx, cstate->second.buf.data(), cstate->second.buf.size(), 0);
-                    if (ret == 0) {
-                        // if the old state is incompatible with the current context - reprocess from scratch
-                        is_cached = false;
-                        cstate = --cstates.rend();
                     }
                 }
 
-                if (!is_cached || t.n_depth > cstate->first) {
+                // decode remaining tokens we need to hit target depth
+                if (rem_depth) {
                     if (params.progress) {
                         fprintf(stderr, "llama-bench: benchmark %d/%zu: depth run %d/%d\n", params_idx, params_count,
                                 i + 1, params.reps);
                     }
-                    bool res = test_prompt(ctx, t.n_depth - cstate->first, t.n_batch, t.n_threads);
+                    bool res = test_prompt(ctx, rem_depth, t.n_batch, t.n_threads);
                     if (!res) {
                         fprintf(stderr, "%s: error: failed to run depth\n", __func__);
                         llama_free(ctx);
@@ -2362,11 +2360,9 @@ int main(int argc, char ** argv) {
                     }
 
                     // store the context state for reuse in later runs
-                    ctx_state new_cstate;
-                    new_cstate.depth = t.n_depth;
-                    new_cstate.buf.resize(llama_state_seq_get_size(ctx, 0));
-                    llama_state_seq_get_data(ctx, new_cstate.buf.data(), new_cstate.buf.size(), 0);
-                    cstates[t.n_depth] = new_cstate;
+                    std::vector<uint8_t>* new_cstate = new std::vector<uint8_t>(llama_state_seq_get_size(ctx, 0));
+                    llama_state_seq_get_data(ctx, new_cstate->data(), new_cstate->size(), 0);
+                    cstates.emplace(t.n_depth, *new_cstate);
                 } else {
                     if (params.progress) {
                         fprintf(stderr, "llama-bench: benchmark %d/%zu: depth run %d/%d (cached)\n", params_idx, params_count,
@@ -2407,12 +2403,12 @@ int main(int argc, char ** argv) {
             uint64_t t_ns = get_time_ns() - t_start;
             t.samples_ns.push_back(t_ns);
 
-            ctx_state new_cstate;
-            new_cstate.depth = t.n_depth + t.n_prompt + t.n_gen;
-            if (!cstates.contains(new_cstate.depth)) {
-                new_cstate.buf.resize(llama_state_seq_get_size(ctx, 0));
-                llama_state_seq_get_data(ctx, new_cstate.buf.data(), new_cstate.buf.size(), 0);
-                cstates[new_cstate.depth] = new_cstate;
+            // store even the post-test context state for the next target depth
+            int new_depth = t.n_depth + t.n_prompt + t.n_gen;
+            if (!cstates.contains(new_depth)) {
+                std::vector<uint8_t>* new_cstate = new std::vector<uint8_t>(llama_state_seq_get_size(ctx, 0));
+                llama_state_seq_get_data(ctx, new_cstate->data(), new_cstate->size(), 0);
+                cstates.emplace(new_depth, *new_cstate);
             }
         }
 
@@ -2431,6 +2427,10 @@ int main(int argc, char ** argv) {
         llama_free(ctx);
 
         ggml_threadpool_free_fn(threadpool);
+    }
+
+    for (auto& [d, buf]: cstates) {
+        delete &buf;
     }
 
     llama_model_free(lmodel);
