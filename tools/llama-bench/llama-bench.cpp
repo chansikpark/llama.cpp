@@ -2223,9 +2223,16 @@ int main(int argc, char ** argv) {
     llama_model *               lmodel    = nullptr;
     const cmd_params_instance * prev_inst = nullptr;
 
-    // store the state at all encountered depths
-    // this arbitrarily reduces entropy across runs
-    // but it's much faster for eg long-context performance tuning
+    //TODO make aggressive caching optional from the command line
+    //TODO add option to log memory burden
+    //TODO verify optimization benefit, verify correctness vs mainline, speed profiling
+    //TODO run sanity-check tests: tg, pp, pp+tg
+    //TODO check contribution guidelines and coding conventions
+
+    // Store the context state at all encountered depths.
+    // this—perhaps incorrectly, or perhaps more correctly, or perhaps benignly—reduces randomness across tests
+    // and it's unclear to me what the side-effects are across all possible parameters and models and hardware
+    // but this would be more usable for eg long-context performance tuning
     depth_cache dcache;
 
     int  params_idx   = 0;
