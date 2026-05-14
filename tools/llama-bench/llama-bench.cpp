@@ -2233,6 +2233,7 @@ int main(int argc, char ** argv) {
     // this—perhaps incorrectly, or perhaps more correctly, or perhaps benignly—reduces randomness across tests
     // and it's unclear to me what the side-effects are across all possible parameters and models and hardware
     // but this would be more usable for eg long-context performance tuning
+    // ref: https://github.com/ggml-org/llama.cpp/pull/16944#issuecomment-3478151721
     depth_cache dcache;
 
     int  params_idx   = 0;
