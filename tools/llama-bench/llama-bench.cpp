@@ -2061,7 +2061,7 @@ struct depth_cache {
 
     int load_context(int depth, llama_context * ctx) {
         // Of all previously encountered depths, find the largest one
-        for (auto it = depth_ctx.crbegin(); it != cstates.crend(); ++it) {
+        for (auto it = depth_ctx.crbegin(); it != depth_ctx.crend(); ++it) {
             // that is at most the current target
             if (it->first <= depth) {
                 // and just restore that context state
@@ -2073,7 +2073,7 @@ struct depth_cache {
             }
         }
         // Nothing in the cache, or incompatible with the current context
-        return depth
+        return depth;
     }
 
     void save_context(int depth, llama_context * ctx) {
